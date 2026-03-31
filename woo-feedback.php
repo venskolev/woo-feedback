@@ -3,7 +3,7 @@
  * Plugin Name: WooFeedback
  * Plugin URI: https://webdigitech.de
  * Description: Управление и визуализация на WooCommerce отзиви за INRA.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: WebDigiTech | Ventsislav Kolev
  * Author URI: https://webdigitech.de
  * Text Domain: woo-feedback
@@ -23,7 +23,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('WOO_FEEDBACK_VERSION')) {
-    define('WOO_FEEDBACK_VERSION', '1.1.0');
+    define('WOO_FEEDBACK_VERSION', '1.2.0');
 }
 
 if (!defined('WOO_FEEDBACK_FILE')) {
