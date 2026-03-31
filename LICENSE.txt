@@ -25,4 +25,4 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 Ventsislav Kolev | WebDigiTech
 https://webdigitech.de
 
-Версия: 1.0.2
+Версия: 1.1.0

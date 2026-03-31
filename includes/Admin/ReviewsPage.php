@@ -53,6 +53,16 @@ final class ReviewsPage
     private const BULK_ACTION_TRASH = 'woo_feedback_bulk_trash';
 
     /**
+     * Plugin-specific capability.
+     */
+    private const PLUGIN_CAPABILITY = 'manage_woo_feedback';
+
+    /**
+     * Legacy fallback capability.
+     */
+    private const LEGACY_CAPABILITY = 'moderate_comments';
+
+    /**
      * Settings service.
      *
      * @var Settings
@@ -82,7 +92,7 @@ final class ReviewsPage
             return;
         }
 
-        if (!current_user_can('moderate_comments')) {
+        if (!$this->current_user_can_access_admin()) {
             return;
         }
 
@@ -97,7 +107,7 @@ final class ReviewsPage
      */
     public function render_page(): void
     {
-        if (!current_user_can('moderate_comments')) {
+        if (!$this->current_user_can_access_admin()) {
             wp_die(esc_html__('Нямате права за достъп до тази страница.', 'woo-feedback'));
         }
 
@@ -773,8 +783,8 @@ final class ReviewsPage
             'hierarchical' => false,
         ];
 
-        $all_args            = $base;
-        $all_args['status']  = 'all';
+        $all_args           = $base;
+        $all_args['status'] = 'all';
 
         $hold_args           = $base;
         $hold_args['status'] = 'hold';
@@ -852,5 +862,29 @@ final class ReviewsPage
             ],
             true
         );
+    }
+
+    /**
+     * Returns whether the current user can access WooFeedback admin pages.
+     *
+     * @return bool
+     */
+    private function current_user_can_access_admin(): bool
+    {
+        if (current_user_can(self::PLUGIN_CAPABILITY)) {
+            return true;
+        }
+
+        if (current_user_can(self::LEGACY_CAPABILITY)) {
+            return true;
+        }
+
+        $filtered_capability = apply_filters('woo_feedback/admin/capability', self::PLUGIN_CAPABILITY);
+
+        if (!is_string($filtered_capability) || $filtered_capability === '') {
+            return false;
+        }
+
+        return current_user_can($filtered_capability);
     }
 }

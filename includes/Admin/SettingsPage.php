@@ -31,6 +31,16 @@ final class SettingsPage
     private const PAGE_SLUG = 'woo-feedback-settings';
 
     /**
+     * Plugin-specific capability.
+     */
+    private const PLUGIN_CAPABILITY = 'manage_woo_feedback';
+
+    /**
+     * Legacy fallback capability.
+     */
+    private const LEGACY_CAPABILITY = 'moderate_comments';
+
+    /**
      * Settings service instance.
      *
      * @var Settings
@@ -103,7 +113,7 @@ final class SettingsPage
                            'woo_feedback_general_section',
                            [
                                'key'         => 'require_login_for_review',
-                           'description' => __('Ако е включено, само влезли потребители могат да изпращат нови отзиви.', 'woo-feedback'),
+                               'description' => __('Ако е включено, само влезли потребители могат да изпращат нови отзиви.', 'woo-feedback'),
                            ]
         );
 
@@ -248,8 +258,6 @@ final class SettingsPage
                                'description' => __('Резервирана настройка за административен информационен блок в следваща стъпка.', 'woo-feedback'),
                            ]
         );
-
-        add_action('woo_feedback/admin/render_settings_page', [$this, 'render_page']);
     }
 
     /**
@@ -275,7 +283,7 @@ final class SettingsPage
      */
     public function render_page(): void
     {
-        if (!current_user_can('moderate_comments')) {
+        if (!$this->current_user_can_access_admin()) {
             wp_die(esc_html__('Нямате права за достъп до тази страница.', 'woo-feedback'));
         }
 
@@ -468,5 +476,29 @@ final class SettingsPage
     private function build_field_id(string $key): string
     {
         return 'woo-feedback-field-' . sanitize_key($key);
+    }
+
+    /**
+     * Returns whether the current user can access WooFeedback admin pages.
+     *
+     * @return bool
+     */
+    private function current_user_can_access_admin(): bool
+    {
+        if (current_user_can(self::PLUGIN_CAPABILITY)) {
+            return true;
+        }
+
+        if (current_user_can(self::LEGACY_CAPABILITY)) {
+            return true;
+        }
+
+        $filtered_capability = apply_filters('woo_feedback/admin/capability', self::PLUGIN_CAPABILITY);
+
+        if (!is_string($filtered_capability) || $filtered_capability === '') {
+            return false;
+        }
+
+        return current_user_can($filtered_capability);
     }
 }

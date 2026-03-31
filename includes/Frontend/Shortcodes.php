@@ -9,6 +9,9 @@ declare(strict_types=1);
 
 namespace WDT\WooFeedback\Frontend;
 
+use WDT\WooFeedback\Reviews\FormHandler;
+use WDT\WooFeedback\Security\AntiSpamService;
+use WDT\WooFeedback\Security\TurnstileService;
 use WDT\WooFeedback\Settings\Settings;
 use WP_Comment;
 
@@ -27,6 +30,36 @@ final class Shortcodes
     private const SHORTCODE_TAG = 'woo_feedback';
 
     /**
+     * Default reviews per page.
+     */
+    private const DEFAULT_REVIEWS_PER_PAGE = 8;
+
+    /**
+     * Maximum allowed reviews per page from shortcode attribute.
+     */
+    private const MAX_REVIEWS_PER_PAGE = 50;
+
+    /**
+     * Cache group.
+     */
+    private const CACHE_GROUP = 'woo_feedback';
+
+    /**
+     * Cache key prefix for review count.
+     */
+    private const CACHE_KEY_COUNT_PREFIX = 'review_count_';
+
+    /**
+     * Cache key prefix for paginated review list.
+     */
+    private const CACHE_KEY_LIST_PREFIX = 'review_list_';
+
+    /**
+     * Cache TTL in seconds.
+     */
+    private const CACHE_TTL = 300;
+
+    /**
      * Settings service.
      *
      * @var Settings
@@ -34,13 +67,34 @@ final class Shortcodes
     private Settings $settings;
 
     /**
+     * Turnstile service.
+     *
+     * @var TurnstileService
+     */
+    private TurnstileService $turnstile_service;
+
+    /**
+     * Anti-spam service.
+     *
+     * @var AntiSpamService
+     */
+    private AntiSpamService $anti_spam_service;
+
+    /**
      * Constructor.
      *
-     * @param Settings $settings Settings service.
+     * @param Settings         $settings          Settings service.
+     * @param TurnstileService $turnstile_service Turnstile service.
+     * @param AntiSpamService  $anti_spam_service Anti-spam service.
      */
-    public function __construct(Settings $settings)
-    {
-        $this->settings = $settings;
+    public function __construct(
+        Settings $settings,
+        TurnstileService $turnstile_service,
+        AntiSpamService $anti_spam_service
+    ) {
+        $this->settings          = $settings;
+        $this->turnstile_service = $turnstile_service;
+        $this->anti_spam_service = $anti_spam_service;
     }
 
     /**
@@ -57,6 +111,19 @@ final class Shortcodes
         if ($this->settings->get('auto_hide_woocommerce_tab', 'no') === 'yes') {
             add_filter('woocommerce_product_tabs', [$this, 'maybe_remove_default_reviews_tab'], 98);
         }
+
+        add_action('comment_post', [$this, 'invalidate_review_cache_on_comment_change'], 20, 3);
+        add_action('edit_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('deleted_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('trashed_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('untrashed_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('spam_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('unspam_comment', [$this, 'invalidate_review_cache_on_comment_update'], 20, 1);
+        add_action('wp_set_comment_status', [$this, 'invalidate_review_cache_on_status_change'], 20, 2);
+        add_action('added_comment_meta', [$this, 'invalidate_review_cache_on_meta_change'], 20, 4);
+        add_action('updated_comment_meta', [$this, 'invalidate_review_cache_on_meta_change'], 20, 4);
+        add_action('deleted_comment_meta', [$this, 'invalidate_review_cache_on_meta_change'], 20, 4);
+        add_action('woo_feedback/review_submitted', [$this, 'invalidate_review_cache_after_submit'], 20, 2);
     }
 
     /**
@@ -70,6 +137,7 @@ final class Shortcodes
      * - show_count: yes|no
      * - button_text
      * - empty_message
+     * - reviews_per_page
      *
      * @param array<string, mixed> $atts Shortcode attributes.
      *
@@ -84,28 +152,35 @@ final class Shortcodes
         }
 
         $defaults = [
-            'title'         => (string) $this->settings->get('default_shortcode_title', 'Отзиви'),
-            'show_form'     => (string) $this->settings->get('show_review_form_default', 'no'),
-            'collapsed'     => 'yes',
-            'show_count'    => 'yes',
-            'button_text'   => (string) $this->settings->get('default_shortcode_title', 'Отзиви'),
-            'empty_message' => (string) $this->settings->get('empty_reviews_message', 'Все още няма отзиви.'),
+            'title'            => (string) $this->settings->get('default_shortcode_title', 'Отзиви'),
+            'show_form'        => (string) $this->settings->get('show_review_form_default', 'no'),
+            'collapsed'        => 'yes',
+            'show_count'       => 'yes',
+            'button_text'      => (string) $this->settings->get('default_shortcode_title', 'Отзиви'),
+            'empty_message'    => (string) $this->settings->get('empty_reviews_message', 'Все още няма отзиви.'),
+            'reviews_per_page' => (string) self::DEFAULT_REVIEWS_PER_PAGE,
         ];
 
         $atts = shortcode_atts($defaults, $atts, self::SHORTCODE_TAG);
 
-        $title         = sanitize_text_field((string) $atts['title']);
-        $show_form     = $this->normalize_yes_no($atts['show_form']);
-        $collapsed     = $this->normalize_yes_no($atts['collapsed']);
-        $show_count    = $this->normalize_yes_no($atts['show_count']);
-        $button_text   = sanitize_text_field((string) $atts['button_text']);
-        $empty_message = sanitize_text_field((string) $atts['empty_message']);
-
-        $reviews      = $this->get_product_reviews($product_id);
-        $review_count = count($reviews);
-        $wrapper_id   = 'woo-feedback-' . $product_id . '-' . wp_rand(1000, 999999);
-        $content_id   = $wrapper_id . '-content';
-        $is_expanded  = $collapsed === 'no';
+        $title                = sanitize_text_field((string) $atts['title']);
+        $show_form            = $this->normalize_yes_no($atts['show_form']);
+        $collapsed            = $this->normalize_yes_no($atts['collapsed']);
+        $show_count           = $this->normalize_yes_no($atts['show_count']);
+        $button_text          = sanitize_text_field((string) $atts['button_text']);
+        $empty_message        = sanitize_text_field((string) $atts['empty_message']);
+        $reviews_per_page     = $this->normalize_reviews_per_page($atts['reviews_per_page']);
+        $wrapper_id           = $this->get_wrapper_id($product_id);
+        $content_id           = $wrapper_id . '-content';
+        $message_state        = $this->get_frontend_message_state();
+        $has_frontend_message = $message_state['status'] !== '';
+        $is_expanded          = $collapsed === 'no' || $has_frontend_message;
+        $reviews_are_allowed  = $this->reviews_are_allowed($product_id);
+        $review_count         = $this->get_product_review_count($product_id);
+        $current_page         = $this->get_current_reviews_page($product_id);
+        $total_pages          = $review_count > 0 ? (int) ceil($review_count / $reviews_per_page) : 1;
+        $current_page         = max(1, min($current_page, $total_pages));
+        $reviews              = $this->get_product_reviews($product_id, $current_page, $reviews_per_page);
 
         ob_start();
         ?>
@@ -113,6 +188,7 @@ final class Shortcodes
         class="woo-feedback-block"
         id="<?php echo esc_attr($wrapper_id); ?>"
         data-product-id="<?php echo esc_attr((string) $product_id); ?>"
+        data-woo-feedback-anchor="<?php echo esc_attr('#' . $wrapper_id); ?>"
         >
         <button
         type="button"
@@ -153,6 +229,17 @@ final class Shortcodes
         <?php $this->render_single_review($review); ?>
         <?php endforeach; ?>
         </ul>
+
+        <?php
+        echo $this->render_reviews_pagination(
+            $product_id,
+            $current_page,
+            $total_pages,
+            $reviews_per_page,
+            $review_count,
+            $wrapper_id
+        ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+        ?>
         <?php else : ?>
         <p class="woo-feedback-empty-message">
         <?php echo esc_html($empty_message); ?>
@@ -162,7 +249,7 @@ final class Shortcodes
 
         <?php if ($show_form === 'yes') : ?>
         <div class="woo-feedback-form-wrap">
-        <?php echo $this->render_form($product_id); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+        <?php echo $this->render_form($product_id, $reviews_are_allowed, $wrapper_id); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
         </div>
         <?php endif; ?>
         </div>
@@ -186,6 +273,117 @@ final class Shortcodes
         }
 
         return $tabs;
+    }
+
+    /**
+     * Invalidates product review cache after frontend submit.
+     *
+     * @param int $comment_id Created comment ID.
+     * @param int $product_id Product ID.
+     *
+     * @return void
+     */
+    public function invalidate_review_cache_after_submit(int $comment_id, int $product_id): void
+    {
+        unset($comment_id);
+
+        if ($product_id < 1) {
+            return;
+        }
+
+        $this->invalidate_product_review_cache($product_id);
+    }
+
+    /**
+     * Invalidates review cache when a comment is created.
+     *
+     * @param int        $comment_id       Comment ID.
+     * @param int|string $comment_approved Approval state.
+     * @param array      $commentdata      Comment payload.
+     *
+     * @return void
+     */
+    public function invalidate_review_cache_on_comment_change(int $comment_id, $comment_approved, array $commentdata): void
+    {
+        unset($comment_approved);
+
+        $product_id = isset($commentdata['comment_post_ID']) ? absint($commentdata['comment_post_ID']) : 0;
+
+        if ($product_id < 1) {
+            $product_id = $this->get_product_id_from_comment_id($comment_id);
+        }
+
+        if ($product_id < 1) {
+            return;
+        }
+
+        $this->invalidate_product_review_cache($product_id);
+    }
+
+    /**
+     * Invalidates review cache when a comment is updated or removed.
+     *
+     * @param int $comment_id Comment ID.
+     *
+     * @return void
+     */
+    public function invalidate_review_cache_on_comment_update(int $comment_id): void
+    {
+        $product_id = $this->get_product_id_from_comment_id($comment_id);
+
+        if ($product_id < 1) {
+            return;
+        }
+
+        $this->invalidate_product_review_cache($product_id);
+    }
+
+    /**
+     * Invalidates review cache when a comment status changes.
+     *
+     * @param int    $comment_id Comment ID.
+     * @param string $status     New status.
+     *
+     * @return void
+     */
+    public function invalidate_review_cache_on_status_change(int $comment_id, string $status): void
+    {
+        unset($status);
+
+        $product_id = $this->get_product_id_from_comment_id($comment_id);
+
+        if ($product_id < 1) {
+            return;
+        }
+
+        $this->invalidate_product_review_cache($product_id);
+    }
+
+    /**
+     * Invalidates review cache when rating or relevant meta changes.
+     *
+     * @param int    $meta_id     Meta ID.
+     * @param int    $comment_id  Comment ID.
+     * @param string $meta_key    Meta key.
+     * @param mixed  $meta_value  Meta value.
+     *
+     * @return void
+     */
+    public function invalidate_review_cache_on_meta_change(int $meta_id, int $comment_id, string $meta_key, $meta_value): void
+    {
+        unset($meta_id, $meta_value);
+
+        if ($meta_key !== 'rating' && $meta_key !== 'verified') {
+            return;
+        }
+
+        $product_id = $this->get_product_id_from_comment_id($comment_id);
+
+        if ($product_id < 1) {
+            return;
+        }
+
+        $this->invalidate_product_review_cache($product_id);
     }
 
     /**
@@ -237,19 +435,41 @@ final class Shortcodes
     /**
      * Renders the review submission form.
      *
-     * @param int $product_id Product ID.
+     * @param int    $product_id          Product ID.
+     * @param bool   $reviews_are_allowed Whether reviews are allowed.
+     * @param string $wrapper_id          Wrapper ID for anchor return.
      *
      * @return string
      */
-    private function render_form(int $product_id): string
+    private function render_form(int $product_id, bool $reviews_are_allowed, string $wrapper_id): string
     {
+        if (!$reviews_are_allowed) {
+            return '<p class="woo-feedback-reviews-disabled">' . esc_html__('Отзивите за този продукт в момента са изключени.', 'woo-feedback') . '</p>';
+        }
+
         if ($this->settings->get('require_login_for_review', 'no') === 'yes' && !is_user_logged_in()) {
             return '<p class="woo-feedback-login-required">' . esc_html__('Трябва да сте влезли в профила си, за да оставите отзив.', 'woo-feedback') . '</p>';
         }
 
-        $form_title  = (string) $this->settings->get('review_form_title', 'Добавете отзив');
-        $button_text = (string) $this->settings->get('submit_button_text', 'Изпрати отзив');
-        $commenter   = wp_get_current_commenter();
+        $form_title     = (string) $this->settings->get('review_form_title', 'Добавете отзив');
+        $button_text    = (string) $this->settings->get('submit_button_text', 'Изпрати отзив');
+        $commenter      = wp_get_current_commenter();
+        $started_at     = time();
+        $turnstile_html = $this->render_turnstile_widget();
+        $flash_state    = $this->get_flash_form_state();
+
+        $author_value  = $this->get_field_value(
+            'woo_feedback_author',
+            (string) ($commenter['comment_author'] ?? ''),
+                                                $flash_state
+        );
+        $email_value   = $this->get_field_value(
+            'woo_feedback_email',
+            (string) ($commenter['comment_author_email'] ?? ''),
+                                                $flash_state
+        );
+        $rating_value  = $this->get_field_value('woo_feedback_rating', '', $flash_state);
+        $comment_value = $this->get_field_value('woo_feedback_comment', '', $flash_state);
 
         ob_start();
         ?>
@@ -260,11 +480,14 @@ final class Shortcodes
 
         <?php $this->render_frontend_messages(); ?>
 
-        <form method="post" action="">
+        <form method="post" action="" class="woo-feedback-submit-form" novalidate>
         <?php wp_nonce_field('woo_feedback_submit_review', 'woo_feedback_nonce'); ?>
         <input type="hidden" name="woo_feedback_action" value="submit_review" />
         <input type="hidden" name="woo_feedback_product_id" value="<?php echo esc_attr((string) $product_id); ?>" />
-        <input type="hidden" name="_wp_http_referer" value="<?php echo esc_attr($this->get_current_page_url()); ?>" />
+        <input type="hidden" name="_wp_http_referer" value="<?php echo esc_attr($this->get_current_page_url('#' . $wrapper_id)); ?>" />
+        <input type="hidden" name="<?php echo esc_attr($this->anti_spam_service->get_started_at_field_name()); ?>" value="<?php echo esc_attr((string) $started_at); ?>" />
+
+        <?php $this->render_honeypot_field(); ?>
 
         <?php if (!is_user_logged_in()) : ?>
         <p class="woo-feedback-field">
@@ -275,7 +498,7 @@ final class Shortcodes
         type="text"
         id="woo-feedback-author-<?php echo esc_attr((string) $product_id); ?>"
         name="woo_feedback_author"
-        value="<?php echo esc_attr($commenter['comment_author'] ?? ''); ?>"
+        value="<?php echo esc_attr($author_value); ?>"
         required
         />
         </p>
@@ -288,7 +511,7 @@ final class Shortcodes
         type="email"
         id="woo-feedback-email-<?php echo esc_attr((string) $product_id); ?>"
         name="woo_feedback_email"
-        value="<?php echo esc_attr($commenter['comment_author_email'] ?? ''); ?>"
+        value="<?php echo esc_attr($email_value); ?>"
         required
         />
         </p>
@@ -304,11 +527,11 @@ final class Shortcodes
         required
         >
         <option value=""><?php echo esc_html__('Изберете оценка', 'woo-feedback'); ?></option>
-        <option value="5">5 - <?php echo esc_html__('Отлично', 'woo-feedback'); ?></option>
-        <option value="4">4 - <?php echo esc_html__('Много добро', 'woo-feedback'); ?></option>
-        <option value="3">3 - <?php echo esc_html__('Добро', 'woo-feedback'); ?></option>
-        <option value="2">2 - <?php echo esc_html__('Слабо', 'woo-feedback'); ?></option>
-        <option value="1">1 - <?php echo esc_html__('Много слабо', 'woo-feedback'); ?></option>
+        <option value="5" <?php selected($rating_value, '5'); ?>>5 - <?php echo esc_html__('Отлично', 'woo-feedback'); ?></option>
+        <option value="4" <?php selected($rating_value, '4'); ?>>4 - <?php echo esc_html__('Много добро', 'woo-feedback'); ?></option>
+        <option value="3" <?php selected($rating_value, '3'); ?>>3 - <?php echo esc_html__('Добро', 'woo-feedback'); ?></option>
+        <option value="2" <?php selected($rating_value, '2'); ?>>2 - <?php echo esc_html__('Слабо', 'woo-feedback'); ?></option>
+        <option value="1" <?php selected($rating_value, '1'); ?>>1 - <?php echo esc_html__('Много слабо', 'woo-feedback'); ?></option>
         </select>
         </p>
 
@@ -321,8 +544,14 @@ final class Shortcodes
         name="woo_feedback_comment"
         rows="6"
         required
-        ></textarea>
+        ><?php echo esc_textarea($comment_value); ?></textarea>
         </p>
+
+        <?php if ($turnstile_html !== '') : ?>
+        <div class="woo-feedback-field woo-feedback-field--turnstile">
+        <?php echo $turnstile_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+        </div>
+        <?php endif; ?>
 
         <p class="woo-feedback-actions">
         <button type="submit" class="woo-feedback-submit">
@@ -343,13 +572,13 @@ final class Shortcodes
      */
     private function render_frontend_messages(): void
     {
-        $status = isset($_GET['woo_feedback_status']) ? sanitize_key((string) wp_unslash($_GET['woo_feedback_status'])) : '';
+        $state = $this->get_frontend_message_state();
 
-        if ($status === '') {
+        if ($state['status'] === '') {
             return;
         }
 
-        if ($status === 'success') {
+        if ($state['status'] === 'success') {
             echo '<div class="woo-feedback-message woo-feedback-message--success">';
             echo esc_html((string) $this->settings->get('success_message', 'Вашият отзив беше изпратен и очаква одобрение от администратор.'));
             echo '</div>';
@@ -357,9 +586,9 @@ final class Shortcodes
             return;
         }
 
-        if ($status === 'error') {
+        if ($state['status'] === 'error') {
             echo '<div class="woo-feedback-message woo-feedback-message--error">';
-            echo esc_html((string) $this->settings->get('error_message', 'Възникна проблем при изпращането на отзива. Моля, опитайте отново.'));
+            echo esc_html($this->get_error_message_by_reason($state['reason']));
             echo '</div>';
         }
     }
@@ -397,14 +626,56 @@ final class Shortcodes
     }
 
     /**
-     * Returns approved reviews for a WooCommerce product.
+     * Returns the total approved reviews count for a WooCommerce product.
      *
      * @param int $product_id Product ID.
      *
+     * @return int
+     */
+    private function get_product_review_count(int $product_id): int
+    {
+        $cache_key = $this->get_review_count_cache_key($product_id);
+        $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
+
+        if ($cached !== false) {
+            return max(0, (int) $cached);
+        }
+
+        $count = get_comments([
+            'post_id' => $product_id,
+            'status'  => 'approve',
+            'type'    => 'review',
+            'count'   => true,
+        ]);
+
+        $normalized = is_numeric($count) ? max(0, (int) $count) : 0;
+
+        wp_cache_set($cache_key, $normalized, self::CACHE_GROUP, self::CACHE_TTL);
+
+        return $normalized;
+    }
+
+    /**
+     * Returns approved reviews for a WooCommerce product page.
+     *
+     * @param int $product_id       Product ID.
+     * @param int $page             Current page.
+     * @param int $reviews_per_page Reviews per page.
+     *
      * @return array<int, WP_Comment>
      */
-    private function get_product_reviews(int $product_id): array
+    private function get_product_reviews(int $product_id, int $page, int $reviews_per_page): array
     {
+        $page             = max(1, $page);
+        $reviews_per_page = max(1, $reviews_per_page);
+        $offset           = ($page - 1) * $reviews_per_page;
+        $cache_key        = $this->get_review_list_cache_key($product_id, $page, $reviews_per_page);
+        $cached           = wp_cache_get($cache_key, self::CACHE_GROUP);
+
+        if (is_array($cached)) {
+            return array_values(array_filter($cached, static fn ($item): bool => $item instanceof WP_Comment));
+        }
+
         $reviews = get_comments([
             'post_id'      => $product_id,
             'status'       => 'approve',
@@ -412,35 +683,182 @@ final class Shortcodes
             'orderby'      => 'comment_date_gmt',
             'order'        => 'DESC',
             'hierarchical' => false,
+            'number'       => $reviews_per_page,
+            'offset'       => $offset,
         ]);
 
         if (!is_array($reviews)) {
-            return [];
+            $reviews = [];
         }
 
-        return array_values(array_filter($reviews, static fn ($item): bool => $item instanceof WP_Comment));
+        $normalized = array_values(array_filter($reviews, static fn ($item): bool => $item instanceof WP_Comment));
+
+        wp_cache_set($cache_key, $normalized, self::CACHE_GROUP, self::CACHE_TTL);
+
+        return $normalized;
+    }
+
+    /**
+     * Renders pagination links for the reviews block.
+     *
+     * @param int    $product_id       Product ID.
+     * @param int    $current_page     Current page.
+     * @param int    $total_pages      Total pages.
+     * @param int    $reviews_per_page Reviews per page.
+     * @param int    $review_count     Total review count.
+     * @param string $wrapper_id       Wrapper ID.
+     *
+     * @return string
+     */
+    private function render_reviews_pagination(
+        int $product_id,
+        int $current_page,
+        int $total_pages,
+        int $reviews_per_page,
+        int $review_count,
+        string $wrapper_id
+    ): string {
+        if ($review_count <= $reviews_per_page || $total_pages <= 1) {
+            return '';
+        }
+
+        $base_url  = $this->get_current_page_url('#' . $wrapper_id);
+        $query_key = $this->get_reviews_page_query_key($product_id);
+
+        ob_start();
+        ?>
+        <nav class="woo-feedback-pagination" aria-label="<?php echo esc_attr__('Навигация за отзиви', 'woo-feedback'); ?>">
+        <div class="woo-feedback-pagination__summary">
+        <?php
+        echo esc_html(
+            sprintf(
+                __('Страница %1$d от %2$d · общо %3$d отзива', 'woo-feedback'),
+                    $current_page,
+                    $total_pages,
+                    $review_count
+            )
+        );
+        ?>
+        </div>
+
+        <div class="woo-feedback-pagination__links">
+        <?php if ($current_page > 1) : ?>
+        <a
+        class="woo-feedback-pagination__link woo-feedback-pagination__link--prev"
+        href="<?php echo esc_url($this->build_reviews_page_url($base_url, $query_key, $current_page - 1)); ?>"
+        >
+        <?php echo esc_html__('Предишна', 'woo-feedback'); ?>
+        </a>
+        <?php endif; ?>
+
+        <?php foreach ($this->get_reviews_page_numbers($current_page, $total_pages) as $page_number) : ?>
+        <?php if ($page_number === 0) : ?>
+        <span class="woo-feedback-pagination__dots" aria-hidden="true">…</span>
+        <?php continue; ?>
+        <?php endif; ?>
+
+        <?php if ($page_number === $current_page) : ?>
+        <span class="woo-feedback-pagination__link is-current" aria-current="page">
+        <?php echo esc_html((string) $page_number); ?>
+        </span>
+        <?php else : ?>
+        <a
+        class="woo-feedback-pagination__link"
+        href="<?php echo esc_url($this->build_reviews_page_url($base_url, $query_key, $page_number)); ?>"
+        >
+        <?php echo esc_html((string) $page_number); ?>
+        </a>
+        <?php endif; ?>
+        <?php endforeach; ?>
+
+        <?php if ($current_page < $total_pages) : ?>
+        <a
+        class="woo-feedback-pagination__link woo-feedback-pagination__link--next"
+        href="<?php echo esc_url($this->build_reviews_page_url($base_url, $query_key, $current_page + 1)); ?>"
+        >
+        <?php echo esc_html__('Следваща', 'woo-feedback'); ?>
+        </a>
+        <?php endif; ?>
+        </div>
+        </nav>
+        <?php
+
+        return (string) ob_get_clean();
+    }
+
+    /**
+     * Returns compact page numbers with ellipsis markers as 0.
+     *
+     * @param int $current_page Current page.
+     * @param int $total_pages  Total pages.
+     *
+     * @return array<int, int>
+     */
+    private function get_reviews_page_numbers(int $current_page, int $total_pages): array
+    {
+        if ($total_pages <= 7) {
+            return range(1, $total_pages);
+        }
+
+        $pages = [1];
+
+        if ($current_page > 3) {
+            $pages[] = 0;
+        }
+
+        for ($page = max(2, $current_page - 1); $page <= min($total_pages - 1, $current_page + 1); $page++) {
+            $pages[] = $page;
+        }
+
+        if ($current_page < $total_pages - 2) {
+            $pages[] = 0;
+        }
+
+        $pages[] = $total_pages;
+
+        return array_values(array_unique($pages));
     }
 
     /**
      * Returns the current page URL for safe redirect back after submit.
      *
+     * @param string $anchor Optional URL fragment.
+     *
      * @return string
      */
-    private function get_current_page_url(): string
+    private function get_current_page_url(string $anchor = ''): string
     {
         global $wp;
 
-        if (isset($wp) && is_object($wp) && method_exists($wp, 'parse_request')) {
-            $url = home_url(add_query_arg([], $wp->request ?? ''));
+        $url = '';
 
-            if (is_string($url) && $url !== '') {
-                return $url;
+        if (isset($wp) && is_object($wp) && method_exists($wp, 'parse_request')) {
+            $resolved = home_url(add_query_arg([], $wp->request ?? ''));
+
+            if (is_string($resolved) && $resolved !== '') {
+                $url = $resolved;
             }
         }
 
-        $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '/';
+        if ($url === '') {
+            $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '/';
+            $url         = home_url($request_uri);
+        }
 
-        return home_url($request_uri);
+        $url = remove_query_arg(
+            [
+                'woo_feedback_status',
+                'woo_feedback_reason',
+                'woo_feedback_form_state',
+            ],
+            $url
+        );
+
+        if ($anchor !== '') {
+            $url .= $anchor;
+        }
+
+        return $url;
     }
 
     /**
@@ -453,5 +871,342 @@ final class Shortcodes
     private function normalize_yes_no(mixed $value): string
     {
         return $value === 'no' ? 'no' : 'yes';
+    }
+
+    /**
+     * Normalizes reviews_per_page shortcode value.
+     *
+     * @param mixed $value Raw value.
+     *
+     * @return int
+     */
+    private function normalize_reviews_per_page(mixed $value): int
+    {
+        $normalized = absint((string) $value);
+
+        if ($normalized < 1) {
+            return self::DEFAULT_REVIEWS_PER_PAGE;
+        }
+
+        return min($normalized, self::MAX_REVIEWS_PER_PAGE);
+    }
+
+    /**
+     * Returns the product-specific pagination query key.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return string
+     */
+    private function get_reviews_page_query_key(int $product_id): string
+    {
+        return 'woo_feedback_page_' . $product_id;
+    }
+
+    /**
+     * Returns the current page for a product review list.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return int
+     */
+    private function get_current_reviews_page(int $product_id): int
+    {
+        $query_key = $this->get_reviews_page_query_key($product_id);
+
+        if (!isset($_GET[$query_key])) {
+            return 1;
+        }
+
+        return max(1, absint((string) wp_unslash($_GET[$query_key])));
+    }
+
+    /**
+     * Builds a pagination URL for the reviews block.
+     *
+     * @param string $base_url  Base URL.
+     * @param string $query_key Query key.
+     * @param int    $page      Target page.
+     *
+     * @return string
+     */
+    private function build_reviews_page_url(string $base_url, string $query_key, int $page): string
+    {
+        $page = max(1, $page);
+
+        if ($page === 1) {
+            return remove_query_arg($query_key, $base_url);
+        }
+
+        return add_query_arg($query_key, $page, $base_url);
+    }
+
+    /**
+     * Returns whether reviews are currently allowed for the product.
+     *
+     * Must stay in sync with FormHandler::reviews_are_allowed().
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return bool
+     */
+    private function reviews_are_allowed(int $product_id): bool
+    {
+        if ($product_id < 1 || get_post_type($product_id) !== 'product') {
+            return false;
+        }
+
+        if (function_exists('wc_review_ratings_enabled')) {
+            $global_reviews_enabled = get_option('woocommerce_enable_reviews', 'yes');
+
+            if ($global_reviews_enabled !== 'yes') {
+                return false;
+            }
+        }
+
+        return comments_open($product_id);
+    }
+
+    /**
+     * Renders the hidden honeypot field when enabled.
+     *
+     * @return void
+     */
+    private function render_honeypot_field(): void
+    {
+        if (!$this->anti_spam_service->is_honeypot_enabled()) {
+            return;
+        }
+
+        ?>
+        <div class="woo-feedback-honeypot" style="position:absolute !important; left:-9999px !important; width:1px !important; height:1px !important; overflow:hidden !important;" aria-hidden="true">
+        <label for="woo-feedback-hp-field"><?php echo esc_html__('Оставете това поле празно', 'woo-feedback'); ?></label>
+        <input
+        type="text"
+        id="woo-feedback-hp-field"
+        name="<?php echo esc_attr($this->anti_spam_service->get_honeypot_field_name()); ?>"
+        value=""
+        tabindex="-1"
+        autocomplete="off"
+        />
+        </div>
+        <?php
+    }
+
+    /**
+     * Renders the Turnstile widget markup when enabled and configured.
+     *
+     * @return string
+     */
+    private function render_turnstile_widget(): string
+    {
+        if (!$this->turnstile_service->should_render_widget()) {
+            return '';
+        }
+
+        $site_key = $this->turnstile_service->get_site_key();
+
+        if ($site_key === '') {
+            return '';
+        }
+
+        ob_start();
+        ?>
+        <div
+        class="cf-turnstile"
+        data-sitekey="<?php echo esc_attr($site_key); ?>"
+        data-theme="auto"
+        data-response-field-name="<?php echo esc_attr($this->turnstile_service->get_response_field_name()); ?>"
+        ></div>
+        <?php
+
+        return (string) ob_get_clean();
+    }
+
+    /**
+     * Returns a user-facing message for a known submit error reason.
+     *
+     * @param string $reason Error reason code.
+     *
+     * @return string
+     */
+    private function get_error_message_by_reason(string $reason): string
+    {
+        return match ($reason) {
+            'reviews_disabled' => __('Отзивите за този продукт в момента са изключени.', 'woo-feedback'),
+            'invalid_nonce' => __('Сесията на формата е изтекла. Моля, презаредете страницата и опитайте отново.', 'woo-feedback'),
+            'invalid_product' => __('Невалиден продукт за отзив.', 'woo-feedback'),
+            'login_required' => __('Трябва да влезете в профила си, за да изпратите отзив.', 'woo-feedback'),
+            'honeypot_rejected',
+            'honeypot_filled' => __('Изпращането беше отказано от защитата срещу автоматизирани заявки.', 'woo-feedback'),
+            'missing_started_at',
+            'missing_submit_timestamp' => __('Липсва информация за защитата на формата. Моля, презаредете страницата и опитайте отново.', 'woo-feedback'),
+            'invalid_started_at',
+            'invalid_submit_timestamp' => __('Невалидни данни за защитата на формата. Моля, презаредете страницата и опитайте отново.', 'woo-feedback'),
+            'submit_too_fast' => __('Формата беше изпратена твърде бързо. Моля, опитайте отново.', 'woo-feedback'),
+            'missing_turnstile_token',
+            'missing_token',
+            'captcha_required' => __('Моля, потвърдете проверката за сигурност.', 'woo-feedback'),
+            'turnstile_failed',
+            'invalid_token',
+            'turnstile_verification_failed',
+            'turnstile_not_configured_fail_closed',
+            'turnstile_request_error_fail_closed',
+            'turnstile_invalid_http_response_fail_closed',
+            'turnstile_invalid_json_fail_closed',
+            'turnstile_hostname_mismatch' => __('Възникна проблем при потвърждаването на защитната проверка. Моля, презаредете страницата и опитайте отново.', 'woo-feedback'),
+            'rate_limited',
+            'rate_limit_exceeded' => __('Направени са твърде много опити за изпращане. Моля, изчакайте малко и опитайте отново.', 'woo-feedback'),
+            'duplicate_review' => __('Изглежда вече сте изпратили същия отзив за този продукт.', 'woo-feedback'),
+            'invalid_payload' => __('Моля, попълнете всички задължителни полета коректно.', 'woo-feedback'),
+            'comment_insert_failed' => __('Неуспешно записване на отзива. Моля, опитайте отново.', 'woo-feedback'),
+            default => (string) $this->settings->get('error_message', 'Възникна проблем при изпращането на отзива. Моля, опитайте отново.'),
+        };
+    }
+
+    /**
+     * Returns normalized frontend message state from query args.
+     *
+     * @return array{status:string,reason:string}
+     */
+    private function get_frontend_message_state(): array
+    {
+        $status = isset($_GET['woo_feedback_status']) ? sanitize_key((string) wp_unslash($_GET['woo_feedback_status'])) : '';
+        $reason = isset($_GET['woo_feedback_reason']) ? sanitize_key((string) wp_unslash($_GET['woo_feedback_reason'])) : '';
+
+        if ($status !== 'success' && $status !== 'error') {
+            $status = '';
+        }
+
+        return [
+            'status' => $status,
+            'reason' => $reason,
+        ];
+    }
+
+    /**
+     * Returns the deterministic wrapper ID for one product block.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return string
+     */
+    private function get_wrapper_id(int $product_id): string
+    {
+        return 'woo-feedback-' . $product_id;
+    }
+
+    /**
+     * Returns cached flash form state from the previous redirect, if available.
+     *
+     * @return array<string, string>
+     */
+    private function get_flash_form_state(): array
+    {
+        static $flash_state = null;
+
+        if (is_array($flash_state)) {
+            return $flash_state;
+        }
+
+        $flash_state = FormHandler::consume_flash_state_from_request();
+
+        return $flash_state;
+    }
+
+    /**
+     * Returns the field value from POST, flash state, or fallback default.
+     *
+     * AJAX errors keep the browser field values automatically.
+     * POST fallback after redirect restores values from flash state.
+     *
+     * @param string               $key         Input key.
+     * @param string               $default     Default value.
+     * @param array<string,string> $flash_state Flash state payload.
+     *
+     * @return string
+     */
+    private function get_field_value(string $key, string $default, array $flash_state): string
+    {
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST' && isset($_POST[$key])) {
+            return trim((string) wp_unslash($_POST[$key]));
+        }
+
+        if (isset($flash_state[$key]) && is_string($flash_state[$key])) {
+            return $flash_state[$key];
+        }
+
+        return $default;
+    }
+
+    /**
+     * Returns product ID for a comment when it is a product review comment.
+     *
+     * @param int $comment_id Comment ID.
+     *
+     * @return int
+     */
+    private function get_product_id_from_comment_id(int $comment_id): int
+    {
+        $comment = get_comment($comment_id);
+
+        if (!$comment instanceof WP_Comment) {
+            return 0;
+        }
+
+        $product_id = absint($comment->comment_post_ID);
+
+        if ($product_id < 1 || get_post_type($product_id) !== 'product') {
+            return 0;
+        }
+
+        return $product_id;
+    }
+
+    /**
+     * Invalidates all cache entries for one product reviews block.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return void
+     */
+    private function invalidate_product_review_cache(int $product_id): void
+    {
+        wp_cache_delete($this->get_review_count_cache_key($product_id), self::CACHE_GROUP);
+
+        for ($page = 1; $page <= self::MAX_REVIEWS_PER_PAGE; $page++) {
+            for ($per_page = 1; $per_page <= self::MAX_REVIEWS_PER_PAGE; $per_page++) {
+                wp_cache_delete(
+                    $this->get_review_list_cache_key($product_id, $page, $per_page),
+                                self::CACHE_GROUP
+                );
+            }
+        }
+    }
+
+    /**
+     * Returns cache key for review count.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return string
+     */
+    private function get_review_count_cache_key(int $product_id): string
+    {
+        return self::CACHE_KEY_COUNT_PREFIX . $product_id;
+    }
+
+    /**
+     * Returns cache key for one paginated review list.
+     *
+     * @param int $product_id Product ID.
+     * @param int $page       Page number.
+     * @param int $per_page   Reviews per page.
+     *
+     * @return string
+     */
+    private function get_review_list_cache_key(int $product_id, int $page, int $per_page): string
+    {
+        return self::CACHE_KEY_LIST_PREFIX . $product_id . '_' . $page . '_' . $per_page;
     }
 }

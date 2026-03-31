@@ -29,13 +29,23 @@ final class HelpPage
     private const REVIEWS_PAGE_SLUG = 'woo-feedback-reviews';
 
     /**
+     * Plugin-specific capability.
+     */
+    private const PLUGIN_CAPABILITY = 'manage_woo_feedback';
+
+    /**
+     * Legacy fallback capability.
+     */
+    private const LEGACY_CAPABILITY = 'moderate_comments';
+
+    /**
      * Renders the help page.
      *
      * @return void
      */
     public function render_page(): void
     {
-        if (!current_user_can('moderate_comments')) {
+        if (!$this->current_user_can_access_admin()) {
             wp_die(esc_html__('Нямате права за достъп до тази страница.', 'woo-feedback'));
         }
 
@@ -347,5 +357,29 @@ final class HelpPage
         </div>
         </div>
         <?php
+    }
+
+    /**
+     * Returns whether the current user can access WooFeedback admin pages.
+     *
+     * @return bool
+     */
+    private function current_user_can_access_admin(): bool
+    {
+        if (current_user_can(self::PLUGIN_CAPABILITY)) {
+            return true;
+        }
+
+        if (current_user_can(self::LEGACY_CAPABILITY)) {
+            return true;
+        }
+
+        $filtered_capability = apply_filters('woo_feedback/admin/capability', self::PLUGIN_CAPABILITY);
+
+        if (!is_string($filtered_capability) || $filtered_capability === '') {
+            return false;
+        }
+
+        return current_user_can($filtered_capability);
     }
 }

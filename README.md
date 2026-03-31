@@ -18,6 +18,8 @@ Collapse бутон с badge за брой одобрени отзиви.
 
 Помощна административна страница с практическа документация за работа с плъгина.
 
+Специализиран security слой за защита на public review submit потока.
+
 Основна концепция
 
 WooFeedback работи върху стандартния WooCommerce модел за product reviews:
@@ -75,6 +77,7 @@ Badge с броя одобрени отзиви.
 Оценка (Rating).
 
 Текст на отзива.
+
 При нужда може да се изисква потребителят да бъде логнат.
 
 4) Админ одобрение
@@ -95,7 +98,29 @@ WooFeedback позволява всеки нов review да бъде:
 
 Настройки: Пълен контрол върху поведението на плъгина.
 
-Помощ: Подробна администратора документация за работа, shortcode параметри, uninstall поведение и practically useful указания.
+Сигурност: Управление на Turnstile, honeypot, time check, rate limiting, duplicate control и failsafe логика.
+
+Помощ: Подробна администратора документация за работа с shortcode, одобрение, uninstall поведение и practically useful указания.
+
+6) Security layer
+
+WooFeedback включва собствен plugin-owned security слой за review submit потока, без зависимост от външни captcha плъгини. Поддържа:
+
+Cloudflare Turnstile.
+
+Honeypot защита.
+
+Minimum submit time anti-bot проверка.
+
+Rate limiting по IP, email и product context.
+
+Duplicate review detection.
+
+Failsafe режим при временен проблем с външна проверка.
+
+7) AJAX submit
+
+При стандартен браузър review формата може да се изпраща без full page reload чрез AJAX, като се запазва и standard POST fallback за среди без JavaScript.
 
 Изисквания
 
@@ -113,7 +138,11 @@ WooCommerce 8.0+
 
 Уверете се, че WooCommerce е активен.
 
-Настройте плъгина от: WooFeedback → Настройки.
+Настройте плъгина от:
+
+WooFeedback → Настройки
+
+WooFeedback → Сигурност
 
 Употреба
 
@@ -121,16 +150,13 @@ WooCommerce 8.0+
 
 [woo_feedback]
 
-
 Показване за конкретен продукт:
 
 [woo_feedback product_id="123"]
 
-
 или
 
 [woo_feedback id="123"]
-
 
 Параметри на shortcode
 
@@ -153,7 +179,6 @@ empty_message - Текст при липса на отзиви.
 [woo_feedback collapsed="yes" show_count="yes" show_form="no"]
 [woo_feedback product_id="123" title="Мнения на читатели" button_text="Виж отзивите"]
 
-
 Административни настройки
 
 От екрана WooFeedback → Настройки могат да се управляват:
@@ -171,6 +196,36 @@ empty_message - Текст при липса на отзиви.
 Преводи и съобщения (success/error, заглавия, текстове на бутони).
 
 Брой елементи в админ списъка.
+
+Security настройки
+
+От екрана WooFeedback → Сигурност могат да се управляват:
+
+Enable security protections.
+
+Enable Cloudflare Turnstile.
+
+Turnstile site key.
+
+Turnstile secret key.
+
+Enable honeypot.
+
+Enable minimum submit time check.
+
+Minimum submit time in seconds.
+
+Enable rate limiting.
+
+Rate limit window.
+
+Rate limit max attempts.
+
+Enable duplicate detection.
+
+Duplicate window in minutes.
+
+Failsafe mode.
 
 Административна помощ
 
@@ -262,6 +317,8 @@ includes/Admin/AdminMenu.php
 
 includes/Admin/SettingsPage.php
 
+includes/Admin/SecurityPage.php
+
 includes/Admin/ReviewsPage.php
 
 includes/Admin/HelpPage.php
@@ -286,7 +343,46 @@ includes/Reviews/ReviewColumns.php
 
 includes/Reviews/Approval.php
 
+Security:
+
+includes/Security/TurnstileService.php
+
+includes/Security/AntiSpamService.php
+
+includes/Security/RateLimitService.php
+
 Uninstall: uninstall.php
+
+Changelog
+
+### 1.2.0
+- Added dedicated Security admin page.
+- Added plugin-owned Cloudflare Turnstile integration.
+- Added honeypot protection for the public review form.
+- Added minimum submit time anti-bot validation.
+- Added rate limiting by IP, email, and product context.
+- Added duplicate review detection within a configurable time window.
+- Added failsafe mode for external verification behavior.
+- Added AJAX review submission with structured success/error responses.
+- Preserved standard POST fallback for non-JavaScript environments.
+- Improved review form UX and submit flow behavior.
+- Added validation to respect whether reviews are enabled for the target product.
+- Added frontend review pagination / load limiting strategy.
+- Added review count/list cache layer with invalidation on review updates.
+- Improved plugin lifecycle by moving upgrade execution to a cleaner admin path.
+- Introduced WooFeedback-specific capability layer with backward-compatible fallback.
+
+### 1.1.0
+- Initial stable production release of WooFeedback.
+- Added frontend shortcode rendering for native WooCommerce reviews.
+- Added collapsible reviews block with review count badge.
+- Added optional frontend review form based on native WooCommerce / WordPress reviews.
+- Added configurable moderation flow for newly submitted reviews.
+- Added dedicated admin pages for Reviews, Settings, and Help.
+- Added separate admin review management screen with filters, bulk actions, and quick moderation controls.
+- Added plugin settings for shortcode behavior, review form visibility, moderation, texts, and admin list size.
+- Added help page with usage documentation, shortcode parameters, uninstall behavior, and administrator guidance.
+- Preserved native WooCommerce / WordPress review storage without custom tables or duplicated review data.
 
 Права и брандинг
 
@@ -294,4 +390,4 @@ Uninstall: uninstall.php
 Ventsislav Kolev | WebDigiTech
 https://webdigitech.de
 
-Версия: 1.0.2
+Версия: 1.2.0
