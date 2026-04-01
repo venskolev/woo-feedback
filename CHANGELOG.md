@@ -1,5 +1,11 @@
 ## Changelog
 
+### 1.2.1
+- Fixed security settings defaults registration to match the current settings schema.
+- Improved frontend review caching with persistent transient-based storage.
+- Kept cache invalidation aligned with review submit and moderation-related update flows.
+- Polished the production readiness of the security and performance layer introduced in 1.2.0.
+
 ### 1.2.0
 - Added dedicated Security admin page.
 - Added plugin-owned Cloudflare Turnstile integration.

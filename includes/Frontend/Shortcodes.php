@@ -55,6 +55,11 @@ final class Shortcodes
     private const CACHE_KEY_LIST_PREFIX = 'review_list_';
 
     /**
+     * Cache key prefix for transient index.
+     */
+    private const CACHE_INDEX_PREFIX = 'review_cache_index_';
+
+    /**
      * Cache TTL in seconds.
      */
     private const CACHE_TTL = 300;
@@ -635,9 +640,9 @@ final class Shortcodes
     private function get_product_review_count(int $product_id): int
     {
         $cache_key = $this->get_review_count_cache_key($product_id);
-        $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
+        $cached    = $this->get_cached_value($product_id, $cache_key);
 
-        if ($cached !== false) {
+        if (is_int($cached) || is_numeric($cached)) {
             return max(0, (int) $cached);
         }
 
@@ -650,7 +655,7 @@ final class Shortcodes
 
         $normalized = is_numeric($count) ? max(0, (int) $count) : 0;
 
-        wp_cache_set($cache_key, $normalized, self::CACHE_GROUP, self::CACHE_TTL);
+        $this->set_cached_value($product_id, $cache_key, $normalized);
 
         return $normalized;
     }
@@ -670,7 +675,7 @@ final class Shortcodes
         $reviews_per_page = max(1, $reviews_per_page);
         $offset           = ($page - 1) * $reviews_per_page;
         $cache_key        = $this->get_review_list_cache_key($product_id, $page, $reviews_per_page);
-        $cached           = wp_cache_get($cache_key, self::CACHE_GROUP);
+        $cached           = $this->get_cached_value($product_id, $cache_key);
 
         if (is_array($cached)) {
             return array_values(array_filter($cached, static fn ($item): bool => $item instanceof WP_Comment));
@@ -693,7 +698,7 @@ final class Shortcodes
 
         $normalized = array_values(array_filter($reviews, static fn ($item): bool => $item instanceof WP_Comment));
 
-        wp_cache_set($cache_key, $normalized, self::CACHE_GROUP, self::CACHE_TTL);
+        $this->set_cached_value($product_id, $cache_key, $normalized);
 
         return $normalized;
     }
@@ -1172,16 +1177,14 @@ final class Shortcodes
      */
     private function invalidate_product_review_cache(int $product_id): void
     {
-        wp_cache_delete($this->get_review_count_cache_key($product_id), self::CACHE_GROUP);
+        $cache_keys = $this->get_product_cache_index($product_id);
 
-        for ($page = 1; $page <= self::MAX_REVIEWS_PER_PAGE; $page++) {
-            for ($per_page = 1; $per_page <= self::MAX_REVIEWS_PER_PAGE; $per_page++) {
-                wp_cache_delete(
-                    $this->get_review_list_cache_key($product_id, $page, $per_page),
-                                self::CACHE_GROUP
-                );
-            }
+        foreach ($cache_keys as $cache_key) {
+            wp_cache_delete($cache_key, self::CACHE_GROUP);
+            delete_transient($this->get_transient_key($cache_key));
         }
+
+        delete_transient($this->get_cache_index_transient_key($product_id));
     }
 
     /**
@@ -1208,5 +1211,115 @@ final class Shortcodes
     private function get_review_list_cache_key(int $product_id, int $page, int $per_page): string
     {
         return self::CACHE_KEY_LIST_PREFIX . $product_id . '_' . $page . '_' . $per_page;
+    }
+
+    /**
+     * Returns one cached value from runtime cache or persistent transient cache.
+     *
+     * @param int    $product_id Product ID.
+     * @param string $cache_key  Cache key.
+     *
+     * @return mixed
+     */
+    private function get_cached_value(int $product_id, string $cache_key): mixed
+    {
+        $cached = wp_cache_get($cache_key, self::CACHE_GROUP);
+
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        $transient_key = $this->get_transient_key($cache_key);
+        $cached        = get_transient($transient_key);
+
+        if ($cached === false) {
+            return false;
+        }
+
+        wp_cache_set($cache_key, $cached, self::CACHE_GROUP, self::CACHE_TTL);
+        $this->register_product_cache_key($product_id, $cache_key);
+
+        return $cached;
+    }
+
+    /**
+     * Stores one value in runtime cache and transient cache.
+     *
+     * @param int    $product_id Product ID.
+     * @param string $cache_key  Cache key.
+     * @param mixed  $value      Cache value.
+     *
+     * @return void
+     */
+    private function set_cached_value(int $product_id, string $cache_key, mixed $value): void
+    {
+        wp_cache_set($cache_key, $value, self::CACHE_GROUP, self::CACHE_TTL);
+        set_transient($this->get_transient_key($cache_key), $value, self::CACHE_TTL);
+        $this->register_product_cache_key($product_id, $cache_key);
+    }
+
+    /**
+     * Registers one cache key in the product cache index.
+     *
+     * @param int    $product_id Product ID.
+     * @param string $cache_key  Cache key.
+     *
+     * @return void
+     */
+    private function register_product_cache_key(int $product_id, string $cache_key): void
+    {
+        $index_key = $this->get_cache_index_transient_key($product_id);
+        $index     = get_transient($index_key);
+
+        if (!is_array($index)) {
+            $index = [];
+        }
+
+        $index[] = $cache_key;
+        $index   = array_values(array_unique(array_filter($index, static fn ($item): bool => is_string($item) && $item !== '')));
+
+        set_transient($index_key, $index, self::CACHE_TTL);
+    }
+
+    /**
+     * Returns the product cache index.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return array<int, string>
+     */
+    private function get_product_cache_index(int $product_id): array
+    {
+        $index = get_transient($this->get_cache_index_transient_key($product_id));
+
+        if (!is_array($index)) {
+            return [];
+        }
+
+        return array_values(array_filter($index, static fn ($item): bool => is_string($item) && $item !== ''));
+    }
+
+    /**
+     * Returns the transient key for one cache entry.
+     *
+     * @param string $cache_key Cache key.
+     *
+     * @return string
+     */
+    private function get_transient_key(string $cache_key): string
+    {
+        return 'woo_feedback_' . md5($cache_key);
+    }
+
+    /**
+     * Returns the transient key for the product cache index.
+     *
+     * @param int $product_id Product ID.
+     *
+     * @return string
+     */
+    private function get_cache_index_transient_key(int $product_id): string
+    {
+        return self::CACHE_INDEX_PREFIX . $product_id;
     }
 }
