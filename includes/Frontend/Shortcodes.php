@@ -460,8 +460,13 @@ final class Shortcodes
         $button_text    = (string) $this->settings->get('submit_button_text', 'Изпрати отзив');
         $commenter      = wp_get_current_commenter();
         $started_at     = time();
-        $turnstile_html = $this->render_turnstile_widget();
-        $flash_state    = $this->get_flash_form_state();
+        $turnstile_html   = $this->render_turnstile_widget();
+        $flash_state      = $this->get_flash_form_state();
+        $field_id_prefix  = $wrapper_id . '-field';
+        $author_field_id  = $field_id_prefix . '-author';
+        $email_field_id   = $field_id_prefix . '-email';
+        $rating_field_id  = $field_id_prefix . '-rating';
+        $comment_field_id = $field_id_prefix . '-comment';
 
         $author_value  = $this->get_field_value(
             'woo_feedback_author',
@@ -496,12 +501,12 @@ final class Shortcodes
 
         <?php if (!is_user_logged_in()) : ?>
         <p class="woo-feedback-field">
-        <label for="woo-feedback-author-<?php echo esc_attr((string) $product_id); ?>">
+        <label for="<?php echo esc_attr($author_field_id); ?>">
         <?php echo esc_html__('Име', 'woo-feedback'); ?>
         </label>
         <input
         type="text"
-        id="woo-feedback-author-<?php echo esc_attr((string) $product_id); ?>"
+        id="<?php echo esc_attr($author_field_id); ?>"
         name="woo_feedback_author"
         value="<?php echo esc_attr($author_value); ?>"
         required
@@ -509,12 +514,12 @@ final class Shortcodes
         </p>
 
         <p class="woo-feedback-field">
-        <label for="woo-feedback-email-<?php echo esc_attr((string) $product_id); ?>">
+        <label for="<?php echo esc_attr($email_field_id); ?>">
         <?php echo esc_html__('Имейл', 'woo-feedback'); ?>
         </label>
         <input
         type="email"
-        id="woo-feedback-email-<?php echo esc_attr((string) $product_id); ?>"
+        id="<?php echo esc_attr($email_field_id); ?>"
         name="woo_feedback_email"
         value="<?php echo esc_attr($email_value); ?>"
         required
@@ -523,11 +528,11 @@ final class Shortcodes
         <?php endif; ?>
 
         <p class="woo-feedback-field">
-        <label for="woo-feedback-rating-<?php echo esc_attr((string) $product_id); ?>">
+        <label for="<?php echo esc_attr($rating_field_id); ?>">
         <?php echo esc_html__('Оценка', 'woo-feedback'); ?>
         </label>
         <select
-        id="woo-feedback-rating-<?php echo esc_attr((string) $product_id); ?>"
+        id="<?php echo esc_attr($rating_field_id); ?>"
         name="woo_feedback_rating"
         required
         >
@@ -541,11 +546,11 @@ final class Shortcodes
         </p>
 
         <p class="woo-feedback-field">
-        <label for="woo-feedback-comment-<?php echo esc_attr((string) $product_id); ?>">
+        <label for="<?php echo esc_attr($comment_field_id); ?>">
         <?php echo esc_html__('Вашият отзив', 'woo-feedback'); ?>
         </label>
         <textarea
-        id="woo-feedback-comment-<?php echo esc_attr((string) $product_id); ?>"
+        id="<?php echo esc_attr($comment_field_id); ?>"
         name="woo_feedback_comment"
         rows="6"
         required
@@ -1090,7 +1095,11 @@ final class Shortcodes
     }
 
     /**
-     * Returns the deterministic wrapper ID for one product block.
+     * Returns a request-stable unique wrapper ID for one rendered product block.
+     *
+     * This prevents duplicate IDs when the same product feedback shortcode is
+     * rendered multiple times on one page, for example in separate desktop and
+     * mobile sections created by the active theme or page builder.
      *
      * @param int $product_id Product ID.
      *
@@ -1098,7 +1107,16 @@ final class Shortcodes
      */
     private function get_wrapper_id(int $product_id): string
     {
-        return 'woo-feedback-' . $product_id;
+        $prefix = 'woo-feedback-' . $product_id . '-';
+
+        if (function_exists('wp_unique_id')) {
+            return wp_unique_id($prefix);
+        }
+
+        static $instance = 0;
+        $instance++;
+
+        return $prefix . (string) $instance;
     }
 
     /**

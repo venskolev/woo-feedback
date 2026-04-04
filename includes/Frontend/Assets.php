@@ -287,11 +287,37 @@ final class Assets
     if (expanded) {
         content.hidden = false;
         content.classList.add('is-open');
+        content.style.display = 'block';
+        content.style.visibility = 'visible';
+        content.style.opacity = '1';
+        content.style.height = 'auto';
+        content.style.maxHeight = 'none';
+        content.style.overflow = 'visible';
         return;
     }
 
     content.hidden = true;
     content.classList.remove('is-open');
+    content.style.display = 'none';
+    }
+
+    function syncInitialState(block) {
+    if (!block) {
+        return;
+    }
+
+    const toggle = block.querySelector(selectors.toggle || '[data-woo-feedback-toggle]');
+    const content = block.querySelector(selectors.content || '.woo-feedback-content');
+
+    if (!toggle || !content) {
+        return;
+    }
+
+    const hasHiddenAttribute = content.hasAttribute('hidden');
+    const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+    const shouldBeExpanded = isExpanded && !hasHiddenAttribute;
+
+    setExpandedState(toggle, content, shouldBeExpanded);
     }
 
     function ensureBlockOpen(block) {
@@ -308,7 +334,7 @@ final class Assets
 
     const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
 
-    if (!isExpanded) {
+    if (!isExpanded || content.hidden) {
         setExpandedState(toggle, content, true);
     }
     }
@@ -473,7 +499,45 @@ final class Assets
     });
     }
 
-    document.querySelectorAll(selectors.toggle || '[data-woo-feedback-toggle]').forEach(function (toggle) {
+    function findToggleFromEventTarget(target) {
+    if (!target || !target.closest) {
+        return null;
+    }
+
+    return target.closest(selectors.toggle || '[data-woo-feedback-toggle]');
+    }
+
+    let lastToggleTime = 0;
+
+    function handleToggleInteraction(event) {
+    const toggle = findToggleFromEventTarget(event.target);
+
+    if (!toggle) {
+        return;
+    }
+
+    if (event.type === 'keydown') {
+        const key = event.key || '';
+
+        if (key !== 'Enter' && key !== ' ' && key !== 'Spacebar') {
+            return;
+    }
+
+    event.preventDefault();
+    }
+
+    const now = Date.now();
+
+    if (event.type === 'click' && now - lastToggleTime < 450) {
+        event.preventDefault();
+        return;
+    }
+
+    if (event.type === 'touchend') {
+        event.preventDefault();
+        lastToggleTime = now;
+    }
+
     const targetId = toggle.getAttribute('data-target');
 
     if (!targetId) {
@@ -486,13 +550,17 @@ final class Assets
         return;
     }
 
-    toggle.addEventListener('click', function () {
-    const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+    const isExpanded = toggle.getAttribute('aria-expanded') === 'true' && !content.hidden;
     setExpandedState(toggle, content, !isExpanded);
-    });
-    });
+    }
+
+    document.addEventListener('click', handleToggleInteraction, true);
+    document.addEventListener('touchend', handleToggleInteraction, { passive: false, capture: true });
+    document.addEventListener('keydown', handleToggleInteraction, true);
 
     blocks.forEach(function (block) {
+    syncInitialState(block);
+
     const message = block.querySelector(selectors.message || '.woo-feedback-message');
     const form = block.querySelector(selectors.form || '.woo-feedback-submit-form');
 
@@ -583,12 +651,35 @@ final class Assets
         }
 
         .woo-feedback-content {
+            display: none;
+            width: 100%;
+            height: auto;
+            max-height: none;
             padding: 18px;
             border-top: 1px solid rgba(0, 0, 0, 0.08);
+            overflow: visible;
+            visibility: visible;
+            opacity: 1;
+            box-sizing: border-box;
+            clear: both;
+        }
+
+        .woo-feedback-content.is-open {
+            display: block !important;
         }
 
         .woo-feedback-content[hidden] {
             display: none !important;
+        }
+
+        .woo-feedback-reviews,
+        .woo-feedback-form-wrap,
+        .woo-feedback-review-list {
+            display: block;
+            width: 100%;
+            max-height: none;
+            overflow: visible;
+            box-sizing: border-box;
         }
 
         .woo-feedback-title {
@@ -826,9 +917,22 @@ final class Assets
         }
 
         @media (max-width: 767px) {
+            .woo-feedback-block,
+            .woo-feedback-content,
+            .woo-feedback-reviews,
+            .woo-feedback-form-wrap {
+                position: relative;
+                z-index: 1;
+                overflow: visible !important;
+                max-height: none !important;
+                height: auto !important;
+            }
+
             .woo-feedback-toggle {
                 padding: 14px 16px;
                 font-size: 15px;
+                touch-action: manipulation;
+                -webkit-tap-highlight-color: transparent;
             }
 
             .woo-feedback-content {

@@ -355,6 +355,11 @@ Uninstall: uninstall.php
 
 Changelog
 
+### 1.2.6
+- Fixed duplicate DOM IDs in WooFeedback shortcode output.
+- Resolved accordion toggle issues affecting repeated review blocks, especially on mobile layouts.
+- Improved frontend markup stability for multiple instances of the same product review block on one page.
+
 ### 1.2.1
 - Fixed security settings defaults registration to match the current settings schema.
 - Improved frontend review caching with persistent transient-based storage.
@@ -396,4 +401,4 @@ Changelog
 Ventsislav Kolev | WebDigiTech
 https://webdigitech.de
 
-Версия: 1.2.1
+Версия: 1.2.6
